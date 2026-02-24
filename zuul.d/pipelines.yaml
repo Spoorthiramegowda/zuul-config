@@ -1,342 +1,110 @@
-# This file is managed by ansible, do not edit directly
 ---
-- pipeline:
-    name: check
-    description: |
-      Newly uploaded patchsets enter this pipeline to receive an
-      initial +/-1 Verified vote.
-    manager: independent
-    trigger:
-      github.com:
-        - event: pull_request
-          action:
-            - opened
-            - changed
-            - reopened
-        - event: pull_request
-          action: comment
-          comment: (?i)^\s*recheck\s*$
-    start:
-      github.com:
-        status: 'pending'
-        status-url: "https://ansible.softwarefactory-project.io/zuul/status.html"
-        comment: false
-      mqtt:
-        topic: "zuul/{pipeline}/start/{project}/{branch}"
-    success:
-      github.com:
-        status: 'success'
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
-    failure:
-      github.com:
-        status: 'failure'
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
+- name: Create two files, merge, and upload to Artifactory (single file)
+  hosts: all
+  gather_facts: false
 
-- pipeline:
-    name: gate
-    description: |
-      Changes that have been approved by core developers are enqueued
-      in order in this pipeline, and if they pass tests, will be
-      merged.
-    success-message: Build succeeded (gate pipeline).
-    failure-message: |
-      Build failed (gate pipeline).  For information on how to proceed, see
-      http://docs.openstack.org/infra/manual/developers.html#automated-testing
-    manager: dependent
-    precedence: high
-    supercedes: check
-    require:
-      github.com:
-        review: []
-        # Require label
-        label: mergeit
-        open: True
-        current-patchset: True
-    trigger:
-      github.com:
-        - event: pull_request_review
-          action: submitted
-          state:
-            - approved
-        - event: pull_request
-          action: comment
-          comment: (?i)^\s*regate\s*$
-        - event: pull_request_review
-          action: submitted
-          state:
-            - approved
-        - event: pull_request_review
-          action: dismissed
-          state:
-            - changes_requested
-        - event: pull_request
-          action: status
-          status: "softwarefactory-project-zuul\\[bot\\]:ansible/check:success"
-        - event: pull_request
-          action: labeled
-          label:
-            - mergeit
-    start:
-      github.com:
-        status: 'pending'
-        status-url: "https://ansible.softwarefactory-project.io/zuul/status.html"
-        comment: false
-      mqtt:
-        topic: "zuul/{pipeline}/start/{project}/{branch}"
-    success:
-      github.com:
-        status: 'success'
-        merge: true
-        comment: true
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
-    failure:
-      github.com:
-        status: 'failure'
-        comment: true
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
-    window-floor: 20
-    window-increase-factor: 2
+  vars:
+    file1_path: "/tmp/input1.txt"
+    file2_path: "/tmp/input2.txt"
+    file1_content: "Hello from file #1 on {{ inventory_hostname }}\n"
+    file2_content: "Hello from file #2 on {{ inventory_hostname }}\n"
 
-- pipeline:
-    name: post
-    post-review: true
-    description: This pipeline runs jobs that operate after each change is merged.
-    manager: independent
-    precedence: low
-    trigger:
-      github.com:
-        - event: push
-          ref: ^refs/heads/.*$
-    start:
-      mqtt:
-        topic: "zuul/{pipeline}/start/{project}/{branch}"
-    success:
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
-    failure:
-      smtp:
-        from: "ansible-zuul@redhat.com"
-        to: "ansible-zuul@redhat.com"
-        subject: '[Zuul] Job failed in post pipeline: {change.project}'
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
+    staging_dir: "{{ zuul.executor.work_root }}/combine"
+    work_artifacts_dir: "{{ zuul.executor.work_root }}/artifacts"
 
-- pipeline:
-    name: pre-release
-    description: When a commit is tagged with a pre-release tag, this pipeline runs jobs that publish archives and documentation.
-    manager: independent
-    precedence: high
-    post-review: True
-    trigger:
-      github.com:
-        - event: push
-          ref: ^refs/tags/(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*)|((?:[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))$
-    success:
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
-    failure:
-      smtp:
-        from: "ansible-zuul@redhat.com"
-        to: "ansible-zuul@redhat.com"
-        subject: '[Zuul] Job failed in pre-release pipeline: {change.project}'
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
+    artifactory_base: "https://artifactory.example.com"
+    artifactory_context: "/artifactory"                 # set "" if not needed
+    artifactory_repo_path_prefix: "/generic-local/combined"
 
-- pipeline:
-    name: release
-    post-review: true
-    description: When a commit is tagged as a release, this pipeline runs jobs that publish archives and documentation.
-    manager: independent
-    precedence: high
-    trigger:
-      github.com:
-        - event: push
-          ref: ^refs/tags/(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$
-    start:
-      mqtt:
-        topic: "zuul/{pipeline}/start/{project}/{branch}"
-    success:
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
-    failure:
-      smtp:
-        from: "ansible-zuul@redhat.com"
-        to: "ansible-zuul@redhat.com"
-        subject: '[Zuul] Job failed in release pipeline: {change.project}'
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
+  tasks:
+    - name: Create input file #1 on remote
+      ansible.builtin.copy:
+        dest: "{{ file1_path }}"
+        content: "{{ file1_content }}"
+        mode: '0644'
 
-- pipeline:
-    name: periodic
-    post-review: true
-    description: Jobs in this queue are triggered daily.
-    manager: independent
-    precedence: low
-    trigger:
-      timer:
-        - time: '0 0 * * *'
-    start:
-      mqtt:
-        topic: "zuul/{pipeline}/start/{project}/{branch}"
-    success:
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
-    failure:
-      smtp:
-        from: "ansible-zuul@redhat.com"
-        to: "ansible-zuul@redhat.com"
-        subject: '[Zuul] Job failed in periodic pipeline: {change.project}'
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
+    - name: Create input file #2 on remote
+      ansible.builtin.copy:
+        dest: "{{ file2_path }}"
+        content: "{{ file2_content }}"
+        mode: '0644'
 
+    - name: Ensure staging and artifacts dirs exist on executor
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - "{{ staging_dir }}"
+        - "{{ work_artifacts_dir }}"
+      delegate_to: localhost
+      run_once: true
 
-- pipeline:
-    name: periodic-1hr
-    post-review: true
-    description: Jobs in this queue are triggered hourly.
-    manager: independent
-    precedence: low
-    trigger:
-      timer:
-        - time: '0 * * * *'
-    start:
-      mqtt:
-        topic: "zuul/{pipeline}/start/{project}/{branch}"
-    success:
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
-    failure:
-      smtp:
-        from: "ansible-zuul@redhat.com"
-        to: "ansible-zuul@redhat.com"
-        subject: '[Zuul] Job failed in periodic-1hr pipeline: {change.project}'
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
+    - name: Fetch input1 to executor staging
+      ansible.builtin.fetch:
+        src: "{{ file1_path }}"
+        dest: "{{ staging_dir }}/in1-{{ inventory_hostname }}.txt"
+        flat: true
 
-- pipeline:
-    name: periodic-6hr
-    post-review: true
-    description: Jobs in this queue are triggered every 6 hours.
-    manager: independent
-    precedence: low
-    trigger:
-      timer:
-        - time: '0 */6 * * *'
-    start:
-      mqtt:
-        topic: "zuul/{pipeline}/start/{project}/{branch}"
-    success:
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
-    failure:
-      smtp:
-        from: "ansible-zuul@redhat.com"
-        to: "ansible-zuul@redhat.com"
-        subject: '[Zuul] Job failed in periodic-6hr pipeline: {change.project}'
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
+    - name: Fetch input2 to executor staging
+      ansible.builtin.fetch:
+        src: "{{ file2_path }}"
+        dest: "{{ staging_dir }}/in2-{{ inventory_hostname }}.txt"
+        flat: true
 
+    - name: Concatenate inputs into a combined file (executor)
+      ansible.builtin.shell: >
+        cat "{{ staging_dir }}/in1-{{ inventory_hostname }}.txt"
+            "{{ staging_dir }}/in2-{{ inventory_hostname }}.txt"
+        > "{{ work_artifacts_dir }}/combined-{{ inventory_hostname }}-{{ zuul.build }}.txt"
+      args:
+        executable: /bin/bash
+      delegate_to: localhost
 
-- pipeline:
-    name: periodic-weekly
-    post-review: true
-    description: Jobs in this queue are triggered on a weekly timer.
-    manager: independent
-    precedence: low
-    trigger:
-      timer:
-        # Saturday 8am UTC is a better time to start weekend jobs, as Sunday
-        # is a working day in some geographies.
-        - time: '0 8 * * 6'
-    start:
-      mqtt:
-        topic: "zuul/{pipeline}/start/{project}/{branch}"
-    success:
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
-    failure:
-      smtp:
-        from: "ansible-zuul@redhat.com"
-        to: "ansible-zuul@redhat.com"
-        subject: '[Zuul] Job failed in periodic-weekly pipeline: {change.project}'
-      mqtt:
-        topic: "zuul/{pipeline}/result/{project}/{branch}/{change}"
+    # --- NEW: resolve API key (secret > var > env) ---------------------------------
+    - name: Resolve Artifactory API key (secret > var > env)
+      ansible.builtin.set_fact:
+        artifactory_api_key_effective: >-
+          {{
+            (artifactory.artifactory_api_key
+             if (artifactory is defined and artifactory.artifactory_api_key is defined)
+             else (artifactory_api_key
+                   if (artifactory_api_key is defined)
+                   else lookup('env', 'ARTIFACTORY_API_KEY')))
+          }}
+      delegate_to: localhost
+      run_once: true
+    # -------------------------------------------------------------------------------
 
-- pipeline:
-    name: ondemand
-    description: On-demand pipeline for requesting a run of optional tests in a collection. Leave review comment of "check ondemand" to run jobs in this pipeline.
-    manager: independent
-    precedence: low
-    trigger:
-      github.com:
-        - event: pull_request
-          action: comment
-          comment: (?i)^\s*check ondemand\s*$
-    start:
-      github.com:
-        status: 'pending'
-        status-url: "https://ansible.softwarefactory-project.io/zuul/status.html"
-        comment: false
-      mqtt:
-        topic: "zuul/{pipeline}/start/{project}/{branch}"
-    success:
-      github.com:
-        check: success
-        comment: false
-    failure:
-      github.com:
-        check: failure
-        comment: false
+    - name: Upload combined file to Artifactory (per host)
+      ansible.builtin.uri:
+        url: >-
+          {{ artifactory_base }}{{ artifactory_context }}
+          {{ artifactory_repo_path_prefix }}/{{ zuul.build }}
+          /combined-{{ inventory_hostname }}-{{ zuul.build }}.txt
+        method: PUT
+        src: "{{ work_artifacts_dir }}/combined-{{ inventory_hostname }}-{{ zuul.build }}.txt"
+        status_code: [200, 201]
+        headers:
+          X-JFrog-Art-Api: "{{ artifactory_api_key_effective }}"
+      delegate_to: localhost
 
-- pipeline:
-    name: merge-check
-    description: >
-      Each time a change merges, this pipeline verifies that all open changes
-      on the same project are still mergeable.
-    failure-message: Build failed (merge-check pipeline).
-    manager: independent
-    ignore-dependencies: true
-    precedence: low
-    trigger: {}
+    - name: Register Artifactory link with Zuul (per host)
+      zuul_return:
+        data:
+          artifacts:
+            - name: "Combined file ({{ inventory_hostname }})"
+              url: >-
+                {{ artifactory_base }}{{ artifactory_context }}
+                {{ artifactory_repo_path_prefix }}/{{ zuul.build }}
+                /combined-{{ inventory_hostname }}-{{ zuul.build }}.txt
+      delegate_to: localhost
 
-- pipeline:
-    name: third-party-check
-    description: |
-      Newly uploaded patchsets to projects that are external to OpenStack
-      enter this pipeline to receive an initial +/-1 Verified vote.
-    success-message: Build succeeded (third-party-check pipeline).
-    # TODO(mordred) We should write a document for non-OpenStack developers
-    failure-message: |
-      Build failed (third-party-check pipeline) integration testing with
-      OpenStack. For information on how to proceed, see
-      http://docs.openstack.org/infra/manual/developers.html#automated-testing
-    manager: independent
-    trigger:
-      github.com:
-        - event: pull_request
-          action:
-            - opened
-            - changed
-            - reopened
-        - event: pull_request
-          action: comment
-          comment: (?i)^\s*recheck\s*$
-    start:
-      github.com:
-        status: 'pending'
-        status-url: 'https://ansible.softwarefactory-project.io/zuul/status.html'
-        comment: false
-    success:
-      github.com:
-        status: 'success'
-        comment: false
-    failure:
-      github.com:
-        status: 'failure'
-        comment: false
-    # Don't report merge-failures to github
-    merge-conflict: {}
+    - name: Display external artifact URL
+      ansible.builtin.debug:
+        msg: |
+          ========================================
+          Artifact uploaded to Artifactory!
+          URL: {{ artifactory_base }}{{ artifactory_context }}{{ artifactory_repo_path_prefix }}/{{ zuul.build }}/combined-{{ inventory_hostname }}-{{ zuul.build }}.txt
+          ========================================
+      delegate_to: localhost
